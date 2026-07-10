@@ -18,6 +18,7 @@ from sem_analysis.annotation import (
     annotate_method3_image,
     annotate_research_image,
     annotate_validated_tips,
+    annotate_whiteboard_image,
 )
 from sem_analysis.deduction import FilteredDetection, apply_deduction
 from sem_analysis.edge_detection import EdgePeakResult, detect_edges_and_peaks, detect_serration_peaks_global
@@ -399,25 +400,48 @@ class SEMAnalysisPipeline:
             annotated_research_path = str(research_path)
             annotated_method_paths["research"] = annotated_research_path
 
-        # Overview annotation
+        # Overview annotation — whiteboard composite (matches reference SEM sketch)
         annotated_path = output_dir / f"{image_path.stem}_annotated.png"
         if arch_first:
-            overview_tips = []
-            for t in protocol_tips:
-                overview_tips.append({
-                    "tip_id": t.tip_id,
-                    "apex_x_px": t.apex_x_px,
-                    "apex_y_px": t.apex_y_px,
-                    "peak_location": [t.apex_x_px, t.apex_y_px],
-                    "hard_valid": t.hard_valid,
-                })
-            annotate_validated_tips(
-                processed.data,
-                overview_tips,
-                processed.nm_per_pixel,
-                self.config,
-                output_path=str(annotated_path),
-            )
+            wb_tips = brainstorming_methods.get("whiteboard", {}).get("per_tip") or []
+            if not wb_tips:
+                wb_tips = [t.whiteboard for t in protocol_tips if getattr(t, "whiteboard", None)]
+            if wb_tips:
+                annotate_whiteboard_image(
+                    processed.data,
+                    wb_tips,
+                    processed.nm_per_pixel,
+                    self.config,
+                    output_path=str(annotated_path),
+                )
+            else:
+                overview_tips = []
+                for t in protocol_tips:
+                    overview_tips.append({
+                        "tip_id": t.tip_id,
+                        "apex_x_px": t.apex_x_px,
+                        "apex_y_px": t.apex_y_px,
+                        "peak_location": [t.apex_x_px, t.apex_y_px],
+                        "hard_valid": t.hard_valid,
+                    })
+                annotate_validated_tips(
+                    processed.data,
+                    overview_tips,
+                    processed.nm_per_pixel,
+                    self.config,
+                    output_path=str(annotated_path),
+                )
+            # Also export dedicated whiteboard PNG
+            if wb_tips:
+                wb_path = output_dir / f"{image_path.stem}_whiteboard.png"
+                annotate_whiteboard_image(
+                    processed.data,
+                    wb_tips,
+                    processed.nm_per_pixel,
+                    self.config,
+                    output_path=str(wb_path),
+                )
+                annotated_method_paths["whiteboard"] = str(wb_path)
         else:
             annotate_image(
                 processed.data,
@@ -506,6 +530,8 @@ class SEMAnalysisPipeline:
                     "peak_y": c.get("peak_location", [None, None])[1],
                     "distance_l_nm": c.get("distance_l_nm"),
                     "distance_l_px": c.get("distance_l_px"),
+                    "included_angle_deg": c.get("included_angle_deg"),
+                    "area_under_curve_nm2": c.get("area_under_curve_nm2"),
                     "fit_band_nm_lo": (c.get("fit_band_nm") or [None, None])[0],
                     "fit_band_nm_hi": (c.get("fit_band_nm") or [None, None])[1],
                     "confidence": c.get("confidence"),
@@ -513,6 +539,15 @@ class SEMAnalysisPipeline:
                 for c in m2
             ]
             pd.DataFrame(rows).to_csv(output_dir / f"{stem}_method2_radii.csv", index=False)
+
+        bv = bs.get("blade_value") or {}
+        if bv.get("per_tip"):
+            pd.DataFrame(bv["per_tip"]).to_csv(output_dir / f"{stem}_blade_value.csv", index=False)
+            # Append blade averages as a summary row file
+            avg = bv.get("blade_value") or {}
+            pd.DataFrame([{**avg, "tip_id": "BLADE_AVG"}]).to_csv(
+                output_dir / f"{stem}_blade_value_avg.csv", index=False
+            )
 
         m3 = bs.get("inscribed_angle", {}).get("per_curve", [])
         if m3:

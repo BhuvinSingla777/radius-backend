@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from sem_analysis.arch_detection import ValidatedArch, detect_validated_arches
+from sem_analysis.blade_value import build_blade_value_table
 from sem_analysis.edge_probability import preprocess_sem
 from sem_analysis.methods.fixed_distance_circle import (
     measure_method1_multi,
@@ -24,6 +25,28 @@ from sem_analysis.methods.projected_tip_distance import (
 from sem_analysis.protocol import get_protocol
 from sem_analysis.roi import MeasurementROI, extract_measurement_roi
 from sem_analysis.stats_summary import summarize_values, tip_confidence
+from sem_analysis.whiteboard_geometry import build_whiteboard_geometry, whiteboard_to_dict
+
+
+def _shift_xy(pt, ox: float, oy: float):
+    if pt is None:
+        return None
+    return [float(pt[0]) + ox, float(pt[1]) + oy]
+
+
+def _shift_line(line, ox: float, oy: float):
+    if not line or len(line) < 4:
+        return line
+    return [
+        float(line[0]) + ox, float(line[1]) + oy,
+        float(line[2]) + ox, float(line[3]) + oy,
+    ]
+
+
+def _shift_poly(poly, ox: float, oy: float):
+    if not poly:
+        return poly
+    return [[float(p[0]) + ox, float(p[1]) + oy] for p in poly]
 
 
 @dataclass
@@ -41,6 +64,7 @@ class TipMeasurement:
     method1: dict = field(default_factory=dict)
     method2: dict = field(default_factory=dict)
     method3: dict = field(default_factory=dict)
+    whiteboard: dict = field(default_factory=dict)
     method1_valid: bool = False
     method2_valid: bool = False
     method3_valid: bool = False
@@ -65,6 +89,8 @@ class TipMeasurement:
             "confidence": self.confidence if self.hard_valid else 0.0,
             "rejection_reason": self.rejection_reason,
             "projected_tip_distance_nm": self.method2.get("distance_l_nm"),
+            "included_angle_deg": self.method2.get("included_angle_deg"),
+            "area_under_curve_nm2": self.method2.get("area_under_curve_nm2"),
             "angle_D100_deg": self.method3.get("angle_degrees"),
         }
         for label, data in (self.method1.get("radii_by_l") or {}).items():
@@ -163,15 +189,12 @@ def measure_all_tips(
             ),
         )
         if m2:
-            # Shift drawable coords to original image
             d = projected_tip_distance_to_dict(m2)
-            if d.get("tip_point"):
-                d["tip_point"] = [d["tip_point"][0] + ox, d["tip_point"][1] + oy]
-            if d.get("convergence_point"):
-                d["convergence_point"] = [
-                    d["convergence_point"][0] + ox,
-                    d["convergence_point"][1] + oy,
-                ]
+            d["tip_point"] = _shift_xy(d.get("tip_point"), ox, oy)
+            d["convergence_point"] = _shift_xy(d.get("convergence_point"), ox, oy)
+            d["left_line"] = _shift_line(d.get("left_line"), ox, oy)
+            d["right_line"] = _shift_line(d.get("right_line"), ox, oy)
+            d["vertical_l_line"] = _shift_line(d.get("vertical_l_line"), ox, oy)
             tm.method2 = d
             tm.method2_valid = bool(m2.valid)
 
@@ -186,10 +209,79 @@ def measure_all_tips(
         )
         if m3:
             d3 = inscribed_angle_to_dict(m3)
-            d3["tip_point"] = [d3["tip_point"][0] + ox, d3["tip_point"][1] + oy]
-            d3["circle_center"] = [d3["circle_center"][0] + ox, d3["circle_center"][1] + oy]
+            d3["tip_point"] = _shift_xy(d3.get("tip_point"), ox, oy)
+            d3["circle_center"] = _shift_xy(d3.get("circle_center"), ox, oy)
+            d3["intersection_left"] = _shift_xy(d3.get("intersection_left"), ox, oy)
+            d3["intersection_right"] = _shift_xy(d3.get("intersection_right"), ox, oy)
+            d3["left_tangent_line"] = _shift_line(d3.get("left_tangent_line"), ox, oy)
+            d3["right_tangent_line"] = _shift_line(d3.get("right_tangent_line"), ox, oy)
             tm.method3 = d3
             tm.method3_valid = bool(m3.valid)
+
+        # Whiteboard composite (matches reference SEM annotation)
+        m1_r_px = None
+        if primary and primary.valid and primary.radius_px:
+            m1_r_px = float(primary.radius_px)
+        wb = build_whiteboard_geometry(
+            tip_id=arch.tip_id,
+            apex=apex,
+            left=left,
+            right=right,
+            nm_per_px=nm_per_px,
+            fit_band_nm=tuple(proto["method2_fit_band_nm"]),
+            method1_radius_px=m1_r_px,
+        )
+        if wb is not None:
+            wd = whiteboard_to_dict(wb)
+            wd["ultimate_tip"] = _shift_xy(wd.get("ultimate_tip"), ox, oy)
+            wd["projected_tip"] = _shift_xy(wd.get("projected_tip"), ox, oy)
+            wd["peak_location"] = _shift_xy(wd.get("peak_location"), ox, oy)
+            wd["circle_center"] = _shift_xy(wd.get("circle_center"), ox, oy)
+            wd["center"] = _shift_xy(wd.get("center"), ox, oy)
+            wd["left_line"] = _shift_line(wd.get("left_line"), ox, oy)
+            wd["right_line"] = _shift_line(wd.get("right_line"), ox, oy)
+            wd["radius_spoke"] = _shift_line(wd.get("radius_spoke"), ox, oy)
+            wd["diameter_line"] = _shift_line(wd.get("diameter_line"), ox, oy)
+            wd["d_bracket"] = _shift_line(wd.get("d_bracket"), ox, oy)
+            wd["vertical_l_line"] = _shift_line(wd.get("vertical_l_line"), ox, oy)
+            wd["edge_left"] = _shift_poly(wd.get("edge_left"), ox, oy)
+            wd["edge_right"] = _shift_poly(wd.get("edge_right"), ox, oy)
+            if wd.get("alpha_arc") and wd["alpha_arc"].get("center"):
+                wd["alpha_arc"] = {
+                    **wd["alpha_arc"],
+                    "center": _shift_xy(wd["alpha_arc"]["center"], ox, oy),
+                }
+            # Prefer Method-1 radius label when available
+            if tm.method1_valid and tm.method1.get("radius_nm") is not None:
+                wd["radius_nm"] = tm.method1["radius_nm"]
+                wd["radius_px"] = tm.method1.get("radius_px")
+            tm.whiteboard = wd
+            # Enrich method2 drawable with whiteboard overlays
+            if tm.method2_valid:
+                tm.method2 = {**tm.method2, **{
+                    k: wd[k] for k in (
+                        "left_line", "right_line", "edge_left", "edge_right",
+                        "alpha_arc", "d_bracket", "projected_tip", "ultimate_tip",
+                        "circle_center", "circle_radius_px", "radius_spoke",
+                        "diameter_line", "d_nm", "d_px",
+                    ) if k in wd
+                }}
+                if wd.get("radius_nm") is not None:
+                    tm.method2["radius_nm"] = wd["radius_nm"]
+
+        # Also shift Method 1 drawable points
+        if tm.method1:
+            for key in ("tip_point", "center", "intersection_left", "intersection_right"):
+                if tm.method1.get(key):
+                    tm.method1[key] = _shift_xy(tm.method1[key], ox, oy)
+            if tm.method1.get("scan_line"):
+                tm.method1["scan_line"] = _shift_line(tm.method1["scan_line"], ox, oy)
+            for lab, rd in (tm.method1.get("radii_by_l") or {}).items():
+                for key in ("tip_point", "center", "intersection_left", "intersection_right"):
+                    if rd.get(key):
+                        rd[key] = _shift_xy(rd[key], ox, oy)
+                if rd.get("scan_line"):
+                    rd["scan_line"] = _shift_line(rd["scan_line"], ox, oy)
 
         # Confidence only after hard validity
         weights = config.get("measurement_methods", {}).get("confidence_weights") or {
@@ -285,6 +377,11 @@ def measure_all_tips(
             "n_detected_candidates": len(arches),
             "n_accepted": len(accepted),
         },
+        "blade_value": build_blade_value_table(tips),
+        "whiteboard": {
+            "per_tip": [t.whiteboard for t in accepted if t.whiteboard],
+            "count": sum(1 for t in accepted if t.whiteboard),
+        },
     }
     summary["fixed_distance_circle"]["median_radius_nm"] = summary["fixed_distance_circle"].get("median")
     summary["fixed_distance_circle"]["mean_radius_nm"] = summary["fixed_distance_circle"].get("mean")
@@ -306,7 +403,8 @@ def tips_to_dataframe(tips: list[TipMeasurement], image_id: str = "") -> pd.Data
         "image_id", "tip_id", "apex_x_px", "apex_y_px", "nm_per_px",
         "border_valid", "left_branch_valid", "right_branch_valid", "fit_residual_px",
         "R25_nm", "R50_nm", "R100_nm", "R200_nm",
-        "projected_tip_distance_nm", "angle_D100_deg",
+        "projected_tip_distance_nm", "included_angle_deg", "area_under_curve_nm2",
+        "angle_D100_deg",
         "method1_valid", "method2_valid", "method3_valid",
         "confidence", "rejection_reason", "hard_valid", "window_valid",
     ]

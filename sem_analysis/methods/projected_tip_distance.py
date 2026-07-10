@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from sem_analysis.blade_value import (
+    area_between_line_and_edge_nm2,
+    flank_included_angle_deg,
+)
 from sem_analysis.edge_geometry import fit_line_tls, intersect_lines, local_symmetry_axis
 
 
@@ -20,6 +24,8 @@ class Method2Result:
     left_line: list[float] = field(default_factory=list)
     right_line: list[float] = field(default_factory=list)
     vertical_l_line: list[float] = field(default_factory=list)
+    included_angle_deg: float | None = None
+    area_under_curve_nm2: float | None = None
     valid: bool = False
     rejection_reason: str | None = None
     method: str = "projected_tip_distance"
@@ -141,6 +147,13 @@ def measure_projected_tip_distance(
         float(apex[0]), float(apex[1]),
         float(projected[0]), float(projected[1]),
     ]
+    try:
+        result.included_angle_deg = flank_included_angle_deg(d_l, d_r)
+    except ValueError:
+        result.included_angle_deg = None
+    area_l = area_between_line_and_edge_nm2(left_band, c_l, d_l, nm_per_pixel)
+    area_r = area_between_line_and_edge_nm2(right_band, c_r, d_r, nm_per_pixel)
+    result.area_under_curve_nm2 = float(area_l + area_r)
     result.valid = True
     return result
 
@@ -156,6 +169,8 @@ def projected_tip_distance_to_dict(result: Method2Result) -> dict:
         "left_line": result.left_line,
         "right_line": result.right_line,
         "vertical_l_line": result.vertical_l_line,
+        "included_angle_deg": result.included_angle_deg,
+        "area_under_curve_nm2": result.area_under_curve_nm2,
         "valid": result.valid,
         "rejection_reason": result.rejection_reason,
     }

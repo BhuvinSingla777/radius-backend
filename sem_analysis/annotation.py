@@ -80,6 +80,134 @@ def _draw_vertical_l(img: np.ndarray, coords: list[float], label: str = "l") -> 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, RED, 1, cv2.LINE_AA)
 
 
+def _draw_polyline(img: np.ndarray, points: list, color: tuple, thickness: int = 1) -> None:
+    if not points or len(points) < 2:
+        return
+    pts = np.array([[int(p[0]), int(p[1])] for p in points], dtype=np.int32)
+    cv2.polylines(img, [pts], False, color, thickness, cv2.LINE_AA)
+
+
+def _draw_caret(img: np.ndarray, tip: tuple[float, float] | list[float], color: tuple = BLUE) -> None:
+    """Blue V marker at the ultimate tip (as in the reference SEM annotation)."""
+    x, y = int(tip[0]), int(tip[1])
+    cv2.line(img, (x - 7, y + 10), (x, y), color, 2, cv2.LINE_AA)
+    cv2.line(img, (x + 7, y + 10), (x, y), color, 2, cv2.LINE_AA)
+
+
+def _draw_alpha_arc(img: np.ndarray, arc: dict) -> None:
+    if not arc:
+        return
+    c = arc.get("center")
+    r = int(max(8, arc.get("radius", 24)))
+    if not c:
+        return
+    cx, cy = int(c[0]), int(c[1])
+    start = float(arc.get("start_deg", 0))
+    end = float(arc.get("end_deg", 40))
+    cv2.ellipse(img, (cx, cy), (r, r), 0, start, end, RED, 2, cv2.LINE_AA)
+    mid = math.radians(0.5 * (start + end))
+    lx = int(cx + (r + 10) * math.cos(mid))
+    ly = int(cy + (r + 10) * math.sin(mid))
+    cv2.putText(img, "a", (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.55, RED, 2, cv2.LINE_AA)
+
+
+def _draw_d_bracket(img: np.ndarray, coords: list[float], label: str = "d") -> None:
+    """Red distance bracket from projected tip to ultimate tip (image label d)."""
+    if len(coords) < 4:
+        return
+    x1, y1, x2, y2 = (float(v) for v in coords[:4])
+    # Offset bracket slightly to the side so it doesn't cover the tip
+    mid_x = 0.5 * (x1 + x2)
+    offset = 14.0
+    p1 = (int(mid_x + offset), int(y1))
+    p2 = (int(mid_x + offset), int(y2))
+    cv2.line(img, p1, p2, RED, 2, cv2.LINE_AA)
+    tick = 6
+    cv2.line(img, (p1[0] - tick, p1[1]), (p1[0] + tick, p1[1]), RED, 2, cv2.LINE_AA)
+    cv2.line(img, (p2[0] - tick, p2[1]), (p2[0] + tick, p2[1]), RED, 2, cv2.LINE_AA)
+    cv2.putText(
+        img, label,
+        (p1[0] + 8, int(0.5 * (p1[1] + p2[1]))),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, RED, 2, cv2.LINE_AA,
+    )
+
+
+def _draw_whiteboard_tip(img: np.ndarray, curve: dict, index: int = 0) -> None:
+    """
+    Draw one tip exactly like the reference annotation:
+      blue edges · yellow flanks · red α · red d · cyan circle · red radius · blue caret
+    """
+    # 1) Actual blade edges (blue)
+    _draw_polyline(img, curve.get("edge_left") or [], BLUE, 1)
+    _draw_polyline(img, curve.get("edge_right") or [], BLUE, 1)
+
+    # 2) Yellow projected flanks (V)
+    _draw_line(img, curve.get("left_line", []), YELLOW, 2)
+    _draw_line(img, curve.get("right_line", []), YELLOW, 2)
+
+    # 3) Projected tip + ultimate tip caret
+    projected = curve.get("projected_tip") or curve.get("convergence_point")
+    ultimate = curve.get("ultimate_tip") or curve.get("tip_point") or curve.get("peak_location")
+    if projected:
+        _draw_dot(img, projected, YELLOW, 4)
+    if ultimate:
+        _draw_caret(img, ultimate, BLUE)
+
+    # 4) Red α arc at projected tip
+    _draw_alpha_arc(img, curve.get("alpha_arc") or {})
+
+    # 5) Red d bracket
+    _draw_d_bracket(img, curve.get("d_bracket") or curve.get("vertical_l_line") or [], "d")
+
+    # 6) Cyan inscribed circle + red radius / diameter
+    center = curve.get("circle_center") or curve.get("center")
+    r_px = curve.get("circle_radius_px") or curve.get("radius_px")
+    if center and r_px:
+        cv2.circle(img, (int(center[0]), int(center[1])), max(3, int(r_px)), CYAN, 2, cv2.LINE_AA)
+        _draw_dot(img, center, RED, 3)
+        spoke = curve.get("radius_spoke")
+        if spoke:
+            _draw_line(img, spoke, RED, 2)
+        else:
+            _draw_line(
+                img,
+                [center[0], center[1], center[0] + float(r_px), center[1]],
+                RED,
+                2,
+            )
+        diam = curve.get("diameter_line")
+        if diam:
+            _draw_line(img, diam, RED, 1)
+
+    # Labels
+    if ultimate and curve.get("radius_nm") is not None:
+        px, py = int(ultimate[0]), int(ultimate[1])
+        parts = [f"R={curve['radius_nm']:.1f}nm"]
+        if curve.get("d_nm") is not None:
+            parts.append(f"d={curve['d_nm']:.1f}nm")
+        if curve.get("included_angle_deg") is not None:
+            parts.append(f"a={curve['included_angle_deg']:.1f}")
+        label = "  ".join(parts)
+        ly = py - 14 if index % 2 == 0 else py + 18
+        cv2.putText(img, label, (px + 10, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.38, YELLOW, 1, cv2.LINE_AA)
+
+
+def annotate_whiteboard_image(
+    image: np.ndarray,
+    per_tip: list[dict],
+    nm_per_pixel: float,
+    config: dict,
+    output_path: str | None = None,
+) -> np.ndarray:
+    """Composite overlay matching the hand-annotated SEM reference."""
+    img = _base_image(image)
+    for i, tip in enumerate(per_tip):
+        _draw_whiteboard_tip(img, tip, i)
+    if output_path:
+        _save_annotated(img, output_path, nm_per_pixel, config)
+    return img
+
+
 def _draw_method1_curve(img: np.ndarray, curve: dict, index: int) -> None:
     """Method 1: blue dots, red scan line, cyan inscribed circle, R label."""
     tip = curve.get("tip_point")
@@ -109,28 +237,22 @@ def _draw_method1_curve(img: np.ndarray, curve: dict, index: int) -> None:
 
 
 def _draw_method2_curve(img: np.ndarray, curve: dict, index: int) -> None:
-    """Method 2: yellow tangents, red vertical l, blue tip dot/arc."""
+    """Method 2: prefer full whiteboard style when geometry is present."""
+    if curve.get("alpha_arc") or curve.get("circle_center"):
+        _draw_whiteboard_tip(img, curve, index)
+        return
     _draw_line(img, curve.get("left_line", []), YELLOW, 2)
     _draw_line(img, curve.get("right_line", []), YELLOW, 2)
-    _draw_vertical_l(img, curve.get("vertical_l_line", []), "l")
-
+    _draw_d_bracket(img, curve.get("vertical_l_line", []), "d")
     tip = curve.get("tip_point")
     if tip:
-        _draw_dot(img, tip, BLUE, 5)
-
-    arc_center = curve.get("tip_arc_center")
-    arc_angles = curve.get("tip_arc_angles")
-    arc_r = curve.get("tip_radius_px")
-    if arc_center and arc_angles and arc_r:
-        cx, cy = int(arc_center[0]), int(arc_center[1])
-        start_deg = math.degrees(arc_angles[0])
-        end_deg = math.degrees(arc_angles[1])
-        cv2.ellipse(img, (cx, cy), (int(arc_r), int(arc_r)), 0, start_deg, end_deg, BLUE, 2, cv2.LINE_AA)
-
+        _draw_caret(img, tip, BLUE)
     peak = curve.get("peak_location") or tip
     if peak and curve.get("distance_l_nm") is not None:
         px, py = int(peak[0]), int(peak[1])
-        label = f"l={curve['distance_l_nm']:.1f}nm"
+        label = f"d={curve['distance_l_nm']:.1f}nm"
+        if curve.get("included_angle_deg") is not None:
+            label += f"  a={curve['included_angle_deg']:.1f}"
         ly = py - 6 if index % 2 == 0 else py + 12
         cv2.putText(img, label, (px + 6, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.32, YELLOW, 1, cv2.LINE_AA)
 

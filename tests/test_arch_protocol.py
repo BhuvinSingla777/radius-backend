@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from sem_analysis.blade_value import flank_included_angle_deg
 from sem_analysis.edge_geometry import circumcircle_radius, fit_line_tls, intersect_lines, stability_ratio
 from sem_analysis.methods.fixed_distance_circle import measure_fixed_distance_at_l, measure_method1_at_l
 from sem_analysis.methods.inscribed_angle import measure_inscribed_angle
@@ -65,8 +66,52 @@ class TestGeometry:
         assert stability_ratio([10, 10, 10]) == 0.0
         assert stability_ratio([10, 12, 14]) > 0.2
 
+    def test_flank_included_angle(self):
+        # 90° between (1,0) and (0,1) after Y-orient → both point +Y-ish
+        a = flank_included_angle_deg([1, 1], [-1, 1])
+        assert 80 < a < 100
+
+    def test_whiteboard_geometry(self):
+        from sem_analysis.whiteboard_geometry import build_whiteboard_geometry
+
+        c = _v_contour(cx=100, cy=60, tip_r=25, flank=160)
+        apex = c[np.argmin(c[:, 1])]
+        left = c[c[:, 0] < apex[0]]
+        right = c[c[:, 0] > apex[0]]
+        g = build_whiteboard_geometry(
+            tip_id=0,
+            apex=apex,
+            left=left,
+            right=right,
+            nm_per_px=2.0,
+            fit_band_nm=(50, 200),
+        )
+        assert g is not None and g.valid
+        assert g.included_angle_deg > 1.0
+        assert g.circle_radius_px > 0
+        assert g.d_px > 0
+        # Projected tip should be above ultimate tip (smaller y)
+        assert g.projected_tip[1] <= g.ultimate_tip[1] + 5
+
 
 class TestMethods:
+    def test_method2_includes_angle_and_area(self):
+        c = _v_contour()
+        apex = c[np.argmin(c[:, 1])]
+        left = c[c[:, 0] < apex[0]]
+        right = c[c[:, 0] > apex[0]]
+        r = measure_projected_tip_distance(
+            nm_per_pixel=2.0,
+            fit_band_nm=(50, 200),
+            apex=apex,
+            left=left,
+            right=right,
+            min_flank_points=5,
+        )
+        assert r is not None and r.valid
+        assert r.included_angle_deg is not None and r.included_angle_deg > 1.0
+        assert r.area_under_curve_nm2 is not None and r.area_under_curve_nm2 >= 0.0
+
     def test_method1_physical_l(self):
         c = _v_contour()
         r = measure_fixed_distance_at_l(c, nm_per_pixel=2.0, distance_l_nm=100.0)

@@ -84,9 +84,11 @@ def _serialize_result(result, job_id: str) -> dict:
         "method1": f"{base}/{stem}_method1.png",
         "method2": f"{base}/{stem}_method2.png",
         "method3": f"{base}/{stem}_method3.png",
+        "whiteboard": f"{base}/{stem}_whiteboard.png",
         "method1_csv": f"{base}/{stem}_method1_radii.csv",
         "method2_csv": f"{base}/{stem}_method2_radii.csv",
         "method3_csv": f"{base}/{stem}_method3_radii.csv",
+        "blade_value_csv": f"{base}/{stem}_blade_value.csv",
         "research": f"{base}/{stem}_research.png",
         "research_csv": f"{base}/{stem}_research_radii.csv",
     }
