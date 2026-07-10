@@ -221,6 +221,9 @@ async def analyze(
             protocol_approved_by=protocol_approved_by,
         )
         return _run_analysis(image_path, job_path, gt_path, overrides or None)
+    except ResizedImageError as exc:
+        log.warning("Job %s | resized image rejected: %s", job_id, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         log.exception("Job %s | analysis failed: %s", job_id, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
