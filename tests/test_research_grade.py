@@ -24,7 +24,14 @@ class TestTiltCorrection:
         assert abs(tilt_scale_factor(60.0) - 2.0) < 1e-9
 
     def test_apply_tilt_correction_doubles_scale(self, config):
-        corrected, info = apply_tilt_correction(1.0, config)
+        cfg = {
+            **config,
+            "calibration": {
+                **config.get("calibration", {}),
+                "tilt_correction": {"enabled": True, "tilt_angle_deg": 60.0},
+            },
+        }
+        corrected, info = apply_tilt_correction(1.0, cfg)
         assert info["applied"] is True
         assert abs(corrected - 2.0) < 1e-9
         assert abs(info["scale_factor"] - 2.0) < 1e-9
@@ -36,10 +43,10 @@ class TestTiltCorrection:
         assert info["applied"] is False
 
     def test_tilt_default_without_config(self):
-        """60° tilt correction is on by default even with empty config."""
+        """Blind 2× tilt correction is off by default (projected measurements only)."""
         corrected, info = apply_tilt_correction(1.0, {})
-        assert info["applied"] is True
-        assert abs(corrected - 2.0) < 1e-9
+        assert info["applied"] is False
+        assert corrected == 1.0
         assert abs(info["tilt_angle_deg"] - 60.0) < 1e-9
 
 
@@ -104,7 +111,12 @@ class TestResearchGrade:
     def test_pipeline_research_output(self, tmp_path, config):
         img_path = tmp_path / "tip.png"
         generate_synthetic_tip(img_path, tip_radius_px=20.0, nm_per_pixel=2.0)
-        pipeline = SEMAnalysisPipeline(config=config)
+        cfg = {
+            **config,
+            "pipeline": {**config.get("pipeline", {}), "legacy_peak_detection": True},
+            "research_grade": {**config.get("research_grade", {}), "enabled": True},
+        }
+        pipeline = SEMAnalysisPipeline(config=cfg)
         result = pipeline.analyze(img_path, output_dir=tmp_path / "out")
         assert "summary" in result.research_grade
         assert result.annotated_research_path is not None
