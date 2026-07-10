@@ -17,6 +17,7 @@ from sem_analysis.annotation import (
     annotate_method2_image,
     annotate_method3_image,
     annotate_research_image,
+    annotate_validated_tips,
 )
 from sem_analysis.deduction import FilteredDetection, apply_deduction
 from sem_analysis.edge_detection import EdgePeakResult, detect_edges_and_peaks, detect_serration_peaks_global
@@ -48,8 +49,22 @@ from sem_analysis.validation import (
 )
 
 
-# Canonical analysis stages (matches product flowchart)
+# Canonical analysis stages — arch-first protocol (default)
 PIPELINE_STAGES = [
+    "original_sem_image",
+    "per_image_scale_bar_calibration",
+    "footer_exclusion_border_margin",
+    "clahe_bilateral_preprocess",
+    "canny_scharr_edge_probability",
+    "complete_arch_detection",
+    "branch_validation_measurement_window",
+    "resample_smooth_edges",
+    "method1_method2_method3_nm",
+    "hard_validity_before_confidence",
+    "unified_tip_csv",
+]
+
+PIPELINE_STAGES_LEGACY = [
     "original_sem_image",
     "crop_metadata_scale_bar",
     "grayscale_clahe_bilateral",
@@ -60,6 +75,14 @@ PIPELINE_STAGES = [
     "curve_or_circle_fitting",
     "pixel_to_nm_conversion",
 ]
+
+
+def _arch_first_enabled(config: dict) -> bool:
+    return bool(config.get("pipeline", {}).get("arch_first", True))
+
+
+def _legacy_peak_enabled(config: dict) -> bool:
+    return bool(config.get("pipeline", {}).get("legacy_peak_detection", False))
 
 
 def load_config(config_path: str | Path | None = None) -> dict:
@@ -95,6 +118,7 @@ class AnalysisResult:
     tilt_correction: dict = field(default_factory=dict)
     calibration: dict = field(default_factory=dict)
     protocol: dict = field(default_factory=dict)
+    pipeline_stages: list[str] = field(default_factory=lambda: list(PIPELINE_STAGES))
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict."""
@@ -132,7 +156,7 @@ class AnalysisResult:
             "research_grade": self.research_grade,
             "annotated_research_path": self.annotated_research_path,
             "tilt_correction": self.tilt_correction,
-            "pipeline_stages": PIPELINE_STAGES,
+            "pipeline_stages": self.pipeline_stages or PIPELINE_STAGES,
         }
 
 
@@ -167,63 +191,45 @@ class SEMAnalysisPipeline:
         output_dir = Path(output_dir) if output_dir else image_path.parent / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # [1] Original SEM image
+        arch_first = _arch_first_enabled(self.config)
+        legacy_peaks = _legacy_peak_enabled(self.config)
+        pipeline_stages = PIPELINE_STAGES if arch_first else PIPELINE_STAGES_LEGACY
+
+        # [1] Original SEM image — per-image calibration (no cross-image averaging)
         sem_image = load_image(
             image_path,
             default_nm_per_pixel=self.config.get("calibration", {}).get("nm_per_pixel", 1.0),
+            config=self.config,
         )
 
-        # [10 early] Pixel-to-nm scale + tilt correction (applied to all later nm outputs)
+        # Tilt metadata stored; blind 2× correction off by default
         nm_corrected, tilt_info = apply_tilt_correction(sem_image.nm_per_pixel, self.config)
         sem_image.nm_per_pixel = nm_corrected
         sem_image.tilt_correction = tilt_info
 
-        # [2–4] Crop metadata/scale-bar → noise reduction → local contrast (CLAHE)
         processed = preprocess(sem_image.data, sem_image.nm_per_pixel, self.config)
-
-        # [6] Contour filtering (shape segmentation + rule filters)
         shapes = detect_shapes(processed.data, self.config)
 
-        # [5] Edge detection + [7] blade-edge selection + [8] tip detection
-        global_edge = detect_serration_peaks_global(processed.data, self.config)
-        edge_results: list[EdgePeakResult] = [global_edge]
+        # Legacy skyline/Harris peak + Hough path (optional; accepts border peaks)
+        global_edge = None
+        edge_results: list[EdgePeakResult] = []
         radius_by_shape: dict[int, list[RadiusResult]] = {}
-        radius_cfg = self.config.get("radius", {})
-        fit_method = radius_cfg.get("primary_method", "hough")
+        all_radii: list[RadiusResult] = []
+        detections: list[FilteredDetection] = []
 
-        # [9] Curve or circle fitting at every tip
-        global_radii: list[RadiusResult] = []
-        for i, peak in enumerate(global_edge.peak_locations):
-            px, py = float(peak[0]), float(peak[1])
-            r = compute_radius(
-                global_edge.edge_points,
-                peak_id=i,
-                shape_id=0,
-                nm_per_pixel=processed.nm_per_pixel,
-                method=fit_method,
-                image=processed.data,
-                peak=(px, py),
-                config=self.config,
-            )
-            if r:
-                global_radii.append(r)
-        radius_by_shape[0] = global_radii
+        if legacy_peaks:
+            global_edge = detect_serration_peaks_global(processed.data, self.config)
+            edge_results = [global_edge]
+            radius_cfg = self.config.get("radius", {})
+            fit_method = radius_cfg.get("primary_method", "hough")
 
-        # Also run per-shape detection for additional peaks
-        for shape in shapes:
-            if shape.shape_id == 0:
-                continue
-            edge = detect_edges_and_peaks(
-                processed.data, shape.shape_id, shape.contour, self.config
-            )
-            edge_results.append(edge)
-            radii: list[RadiusResult] = []
-            for i, peak in enumerate(edge.peak_locations):
+            global_radii: list[RadiusResult] = []
+            for i, peak in enumerate(global_edge.peak_locations):
                 px, py = float(peak[0]), float(peak[1])
                 r = compute_radius(
-                    edge.edge_points,
+                    global_edge.edge_points,
                     peak_id=i,
-                    shape_id=shape.shape_id,
+                    shape_id=0,
                     nm_per_pixel=processed.nm_per_pixel,
                     method=fit_method,
                     image=processed.data,
@@ -231,68 +237,75 @@ class SEMAnalysisPipeline:
                     config=self.config,
                 )
                 if r:
-                    radii.append(r)
-            radius_by_shape[shape.shape_id] = radii
+                    global_radii.append(r)
+            radius_by_shape[0] = global_radii
 
-        # [6] Deduction & classification
-        detections = apply_deduction(
-            shapes, processed.data.shape, self.config, radius_by_shape
-        )
-
-        # Attach radius results — global serration radii are primary
-        all_radii: list[RadiusResult] = list(global_radii)
-        for det in detections:
-            if det.passed:
-                shape_radii = radius_by_shape.get(det.shape.shape_id, [])
-                if det.shape.shape_id != 0:
-                    det.radius_results = shape_radii
-                    for r in shape_radii:
-                        r.confidence_score = det.confidence_score
-                    all_radii.extend(shape_radii)
-        # Deduplicate radii at same peak location
-        if len(all_radii) > 1:
-            kept: list[RadiusResult] = []
-            for r in all_radii:
-                if r.peak_location is None:
-                    kept.append(r)
+            for shape in shapes:
+                if shape.shape_id == 0:
                     continue
-                if all(
-                    np.linalg.norm(np.array(r.peak_location) - np.array(k.peak_location)) > 8
-                    for k in kept if k.peak_location
-                ):
-                    kept.append(r)
-            all_radii = kept
+                edge = detect_edges_and_peaks(
+                    processed.data, shape.shape_id, shape.contour, self.config
+                )
+                edge_results.append(edge)
+                radii: list[RadiusResult] = []
+                for i, peak in enumerate(edge.peak_locations):
+                    px, py = float(peak[0]), float(peak[1])
+                    r = compute_radius(
+                        edge.edge_points,
+                        peak_id=i,
+                        shape_id=shape.shape_id,
+                        nm_per_pixel=processed.nm_per_pixel,
+                        method=fit_method,
+                        image=processed.data,
+                        peak=(px, py),
+                        config=self.config,
+                    )
+                    if r:
+                        radii.append(r)
+                radius_by_shape[shape.shape_id] = radii
 
-        # [7] Radius aggregation
-        aggregation = aggregate_radii(
-            all_radii, method=radius_cfg.get("aggregation", "mean")
-        )
-        tip_condition = None
-        if aggregation.get("mean_radius_nm") is not None:
-            tip_condition = classify_tip_condition(
-                aggregation["mean_radius_nm"], self.config
-            ).value
+            detections = apply_deduction(
+                shapes, processed.data.shape, self.config, radius_by_shape
+            )
+            all_radii = list(global_radii)
+            for det in detections:
+                if det.passed:
+                    shape_radii = radius_by_shape.get(det.shape.shape_id, [])
+                    if det.shape.shape_id != 0:
+                        det.radius_results = shape_radii
+                        for r in shape_radii:
+                            r.confidence_score = det.confidence_score
+                        all_radii.extend(shape_radii)
+            if len(all_radii) > 1:
+                kept: list[RadiusResult] = []
+                for r in all_radii:
+                    if r.peak_location is None:
+                        kept.append(r)
+                        continue
+                    if all(
+                        np.linalg.norm(np.array(r.peak_location) - np.array(k.peak_location)) > 8
+                        for k in kept if k.peak_location
+                    ):
+                        kept.append(r)
+                all_radii = kept
 
-        # Brainstorming / protocol methods on validated arches (same tip IDs)
+        # Arch-first protocol: footer ROI → complete arches → Methods 1–3 (same tip IDs)
         brainstorming_methods: dict = {}
-        brainstorming_raw: dict = {}
         annotated_method_paths: dict = {}
         tip_rows_df = None
-        if run_alternative_methods:
+        protocol_tips: list = []
+
+        if arch_first or run_alternative_methods:
             border_m = int(self.config.get("preprocessing", {}).get("border_margin_px", 10))
-            # Use original grayscale (pre-float) for ROI: rebuild from processed original_shape
-            # Prefer raw SEM data for footer detection
             roi = extract_measurement_roi(sem_image.data, border_margin_px=border_m)
-            tips, brainstorming_methods = measure_all_tips(
+            protocol_tips, brainstorming_methods = measure_all_tips(
                 roi,
                 processed.nm_per_pixel,
                 self.config,
                 image_id=image_path.name,
             )
-            brainstorming_raw = {"tips": tips}
-            tip_rows_df = tips_to_dataframe(tips, image_id=image_path.name)
+            tip_rows_df = tips_to_dataframe(protocol_tips, image_id=image_path.name)
 
-            # Annotate on ROI image pasted into a canvas matching processed size when possible
             ann_base = processed.data
             method1_path = output_dir / f"{image_path.stem}_method1.png"
             method2_path = output_dir / f"{image_path.stem}_method2.png"
@@ -321,17 +334,46 @@ class SEMAnalysisPipeline:
                 "method3": str(method3_path),
             }
 
-            # Unified tip CSV (same tip IDs across methods)
             if tip_rows_df is not None and len(tip_rows_df):
-                tip_rows_df.to_csv(output_dir / f"{image_path.stem}_tips.csv", index=False)
-                annotated_method_paths["tips_csv"] = str(output_dir / f"{image_path.stem}_tips.csv")
+                tips_csv = output_dir / f"{image_path.stem}_tips.csv"
+                tip_rows_df.to_csv(tips_csv, index=False)
+                annotated_method_paths["tips_csv"] = str(tips_csv)
 
+        # Aggregation — protocol medians when arch-first; legacy Hough otherwise
+        radius_cfg = self.config.get("radius", {})
+        if arch_first and brainstorming_methods:
+            m1 = brainstorming_methods.get("fixed_distance_circle", {})
+            m2 = brainstorming_methods.get("projected_tip_distance", {})
+            aggregation = {
+                "count": m1.get("count", 0),
+                "mean_radius_nm": m1.get("median_radius_nm") or m1.get("median"),
+                "median_radius_nm": m1.get("median_radius_nm") or m1.get("median"),
+                "std_radius_nm": m1.get("std"),
+                "method2_median_l_nm": m2.get("median_distance_l_nm") or m2.get("median"),
+                "n_hard_valid": brainstorming_methods.get("tip_validation", {}).get("n_accepted", 0),
+            }
+            primary_method = "fixed_distance_circle"
+        else:
+            aggregation = aggregate_radii(
+                all_radii, method=radius_cfg.get("aggregation", "mean")
+            )
+            primary_method = radius_cfg.get("primary_method", "hough")
 
-        # Research-grade osculating circle metrology
+        tip_condition = None
+        mean_r = aggregation.get("mean_radius_nm") or aggregation.get("median_radius_nm")
+        if mean_r is not None:
+            tip_condition = classify_tip_condition(mean_r, self.config).value
+
+        # Research-grade osculating (legacy peaks only — disabled by default)
         research_grade: dict = {}
         annotated_research_path: str | None = None
         research_cfg = self.config.get("research_grade", {})
-        if research_cfg.get("enabled", False) and len(global_edge.peak_locations) > 0:
+        if (
+            legacy_peaks
+            and research_cfg.get("enabled", False)
+            and global_edge is not None
+            and len(global_edge.peak_locations) > 0
+        ):
             osc_results, osc_summary = measure_all_osculating_tips(
                 processed.data,
                 global_edge.peak_locations,
@@ -343,7 +385,7 @@ class SEMAnalysisPipeline:
             research_grade = {
                 "summary": osc_summary,
                 "per_curve": per_curve,
-                "pipeline": list(PIPELINE_STAGES),
+                "pipeline": list(pipeline_stages),
             }
 
             research_path = output_dir / f"{image_path.stem}_research.png"
@@ -357,17 +399,35 @@ class SEMAnalysisPipeline:
             annotated_research_path = str(research_path)
             annotated_method_paths["research"] = annotated_research_path
 
-        # [5] Annotation — Hough bulk serration view (cyan circles)
+        # Overview annotation
         annotated_path = output_dir / f"{image_path.stem}_annotated.png"
-        annotate_image(
-            processed.data,
-            detections,
-            edge_results,
-            processed.nm_per_pixel,
-            self.config,
-            output_path=str(annotated_path),
-            all_radii=all_radii,
-        )
+        if arch_first:
+            overview_tips = []
+            for t in protocol_tips:
+                overview_tips.append({
+                    "tip_id": t.tip_id,
+                    "apex_x_px": t.apex_x_px,
+                    "apex_y_px": t.apex_y_px,
+                    "peak_location": [t.apex_x_px, t.apex_y_px],
+                    "hard_valid": t.hard_valid,
+                })
+            annotate_validated_tips(
+                processed.data,
+                overview_tips,
+                processed.nm_per_pixel,
+                self.config,
+                output_path=str(annotated_path),
+            )
+        else:
+            annotate_image(
+                processed.data,
+                detections,
+                edge_results,
+                processed.nm_per_pixel,
+                self.config,
+                output_path=str(annotated_path),
+                all_radii=all_radii,
+            )
 
         # [8] Validation
         validation_result = None
@@ -389,7 +449,9 @@ class SEMAnalysisPipeline:
             source_path=str(image_path),
             nm_per_pixel=processed.nm_per_pixel,
             shapes_detected=len(shapes),
-            shapes_passed=sum(1 for d in detections if d.passed),
+            shapes_passed=sum(1 for d in detections if d.passed) if legacy_peaks else (
+                brainstorming_methods.get("tip_validation", {}).get("n_accepted", 0)
+            ),
             radius_results=all_radii,
             aggregation=aggregation,
             tip_condition=tip_condition,
@@ -397,7 +459,7 @@ class SEMAnalysisPipeline:
             edge_results=edge_results,
             alternative_methods=brainstorming_methods,
             brainstorming_methods=brainstorming_methods,
-            primary_method="osculating_circle",
+            primary_method=primary_method,
             validation=validation_result,
             annotated_image_path=str(annotated_path),
             annotated_method_paths=annotated_method_paths,
@@ -406,6 +468,7 @@ class SEMAnalysisPipeline:
             tilt_correction=tilt_info,
             calibration=calibration,
             protocol=protocol_meta,
+            pipeline_stages=list(pipeline_stages),
         )
 
         self._export_reports(result, output_dir, image_path.stem)

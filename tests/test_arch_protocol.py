@@ -40,6 +40,13 @@ class TestROI:
 
 
 class TestGeometry:
+    def test_smooth_branch_rejects_short(self):
+        from sem_analysis.edge_geometry import smooth_branch
+
+        apex = np.array([50.0, 50.0])
+        pts = np.array([[48.0, 51.0], [52.0, 51.0], [50.0, 52.0]])
+        assert smooth_branch(pts, apex) is None
+
     def test_circumcircle(self):
         # Unit circle through (1,0), (0,1), (-1,0) → R=1
         r = circumcircle_radius([1, 0], [0, 1], [-1, 0])

@@ -104,7 +104,7 @@ class TestPipeline:
         assert "aggregation" in report
         assert "brainstorming_methods" in report
         assert "projected_tip_distance" in report["brainstorming_methods"]
-        assert report["primary_method"] == "osculating_circle"
+        assert report["primary_method"] == "fixed_distance_circle"
 
         bs = report["brainstorming_methods"]
         assert "fixed_distance_circle" in bs
@@ -120,9 +120,7 @@ class TestPipeline:
         assert Path(method_paths["method2"]).exists()
         assert Path(method_paths["method3"]).exists()
 
-        assert (tmp_path / "output" / f"{sample_image.stem}_method1_radii.csv").exists()
-        assert (tmp_path / "output" / f"{sample_image.stem}_method2_radii.csv").exists()
-        assert (tmp_path / "output" / f"{sample_image.stem}_method3_radii.csv").exists()
+        assert (tmp_path / "output" / f"{sample_image.stem}_tips.csv").exists()
 
     def test_brainstorming_methods(self, sample_image, tmp_path):
         pipeline = SEMAnalysisPipeline()

@@ -13,6 +13,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from sem_analysis.io.image_loader import ResizedImageError
 from sem_analysis.pipeline import SEMAnalysisPipeline
 from sem_analysis.protocol import apply_protocol_overrides, get_protocol, parse_protocol_form
 
